@@ -1,0 +1,379 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+package.json
+src/app.js
+src/config/firebase.js
+src/middleware/authMiddleware.js
+src/middleware/errorMiddleware.js
+src/middleware/rateLimiter.js
+src/middleware/validationMiddleware.js
+src/server.js
+src/services/security/aiSecurity.js
+src/sockets/socketAuth.js
+src/utils/generateToken.js
+src/utils/hashPassword.js
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+node_modules
+.env
+serviceAccountKey.json
+</file>
+
+<file path="package.json">
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.1",
+    "firebase-admin": "^13.9.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "socket.io": "^4.8.3",
+    "validator": "^13.15.35",
+    "xss": "^1.0.15"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
+</file>
+
+<file path="src/app.js">
+const express = require("express")
+const dotenv = require("dotenv")
+const cors = require("cors")
+const helmet = require("helmet")
+
+const authMiddleware = require("./middleware/authMiddleware")
+const rateLimiter = require("./middleware/rateLimiter")
+const validationMiddleware = require("./middleware/validationMiddleware")
+const errorMiddleware = require("./middleware/errorMiddleware")
+
+dotenv.config()
+
+const app = express()
+
+app.use(helmet())
+app.use(cors())
+app.use(express.json())
+app.use(rateLimiter)
+
+app.get("/", (req, res) => {
+    res.send("Security API Running")
+})
+
+app.get("/private", authMiddleware, (req, res) => {
+
+    res.json({
+        message: "Protected route accessed",
+        user: req.user
+    })
+
+})
+
+app.use(errorMiddleware)
+
+
+module.exports = app
+</file>
+
+<file path="src/config/firebase.js">
+const admin = require("firebase-admin")
+
+// Charger les variables d'environnement ou fichier clé
+const serviceAccount = require("../../serviceAccountKey.json")
+
+// Initialisation Firebase Admin
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+})
+
+// Connexion Firestore
+const db = admin.firestore()
+
+module.exports = { admin, db }
+</file>
+
+<file path="src/middleware/authMiddleware.js">
+const jwt = require("jsonwebtoken")
+
+const authMiddleware = (req, res, next) => {
+
+    // Recuperer le header Authorization
+    const authHeader = req.headers.authorization
+
+    // Verifier si le token existe
+    if (!authHeader) {
+        return res.status(401).json({
+            message: "Access denied. No token provided."
+        })
+    }
+
+    // Extraire le token
+    const token = authHeader.split(" ")[1]
+
+    try {
+
+        // Verifier le token
+        const decoded = jwt.verify(
+            token,
+            process.env.JWT_SECRET
+        )
+
+        // Ajouter utilisateur dans req
+        req.user = decoded
+
+        // Continuer
+        next()
+
+    } catch (error) {
+
+        return res.status(401).json({
+            message: "Invalid token."
+        })
+    }
+}
+
+module.exports = authMiddleware
+</file>
+
+<file path="src/middleware/errorMiddleware.js">
+const errorMiddleware = (err, req, res, next) => {
+
+    console.error("ERROR:", err.message)
+
+    const statusCode = res.statusCode === 200 ? 500 : res.statusCode
+
+    res.status(statusCode).json({
+        message: err.message || "Internal Server Error",
+        stack: process.env.NODE_ENV === "development" ? err.stack : null
+    })
+}
+
+module.exports = errorMiddleware
+</file>
+
+<file path="src/middleware/rateLimiter.js">
+const rateLimit = require("express-rate-limit")
+
+// Limiteur général API
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // max 100 requêtes
+    message: {
+        message: "Too many requests, try again later."
+    },
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
+module.exports = apiLimiter
+</file>
+
+<file path="src/middleware/validationMiddleware.js">
+const validator = require("validator")
+const xss = require("xss")
+
+const validationMiddleware = (req, res, next) => {
+
+    // On récupère les données
+    const body = req.body
+
+    if (!body) {
+        return res.status(400).json({
+            message: "No data provided"
+        })
+    }
+
+    // Nettoyage XSS sur chaque champ
+    for (let key in body) {
+        if (typeof body[key] === "string") {
+            body[key] = xss(body[key])
+        }
+    }
+
+    // Validation email si présent
+    if (body.email) {
+        if (!validator.isEmail(body.email)) {
+            return res.status(400).json({
+                message: "Invalid email format"
+            })
+        }
+    }
+
+    // Validation mot de passe si présent
+    if (body.password) {
+        if (!validator.isLength(body.password, { min: 6 })) {
+            return res.status(400).json({
+                message: "Password must be at least 6 characters"
+            })
+        }
+    }
+
+    next()
+}
+
+module.exports = validationMiddleware
+</file>
+
+<file path="src/server.js">
+const app = require("./app")
+
+const PORT = process.env.PORT || 5000
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`)
+})
+</file>
+
+<file path="src/services/security/aiSecurity.js">
+const xss = require("xss")
+const validator = require("validator")
+
+const aiSecurity = (message) => {
+
+    if (!message) {
+        return {
+            valid: false,
+            error: "Empty message"
+        }
+    }
+
+    // limiter taille message
+    if (message.length > 500) {
+        return {
+            valid: false,
+            error: "Message too long"
+        }
+    }
+
+    // nettoyage XSS
+    let cleanMessage = xss(message)
+
+    // suppression caractères dangereux
+    cleanMessage = validator.escape(cleanMessage)
+
+    return {
+        valid: true,
+        message: cleanMessage
+    }
+}
+
+module.exports = aiSecurity
+</file>
+
+<file path="src/sockets/socketAuth.js">
+const jwt = require("jsonwebtoken")
+
+const socketAuth = (socket, next) => {
+
+    try {
+
+        // récupérer token envoyé par le frontend
+        const token = socket.handshake.auth?.token
+
+        if (!token) {
+            return next(new Error("No token provided"))
+        }
+
+        // vérifier token
+        const decoded = jwt.verify(token, process.env.JWT_SECRET)
+
+        // attacher user au socket
+        socket.user = decoded
+
+        next()
+
+    } catch (error) {
+        return next(new Error("Unauthorized socket connection"))
+    }
+}
+
+module.exports = socketAuth
+</file>
+
+<file path="src/utils/generateToken.js">
+const jwt = require("jsonwebtoken")
+
+const generateToken = (userId) => {
+    return jwt.sign(
+        { id: userId },
+        process.env.JWT_SECRET,
+        { expiresIn: "7d" }
+    )
+}
+
+module.exports = generateToken
+</file>
+
+<file path="src/utils/hashPassword.js">
+const bcrypt = require("bcrypt")
+
+const hashPassword = async (password) => {
+    const salt = await bcrypt.genSalt(10)
+    return await bcrypt.hash(password, salt)
+}
+
+module.exports = hashPassword
+</file>
+
+</files>

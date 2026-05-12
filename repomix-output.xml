@@ -1,0 +1,2895 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+~$hier de charge 2.docx
+Cahier de charge 2.docx
+server/.env.example
+server/app.js
+server/controllers/activityController.js
+server/controllers/aiController.js
+server/controllers/authController.js
+server/controllers/matchController.js
+server/controllers/messageController.js
+server/controllers/userController.js
+server/firebase/firebaseConfig.json
+server/firebase/index.js
+server/middleware/authMiddleware.js
+server/middleware/rateLimit.js
+server/middleware/validation.js
+server/package.json
+server/README.md
+server/repomix-output.xml
+server/routes/activityRoutes.js
+server/routes/aiRoutes.js
+server/routes/authRoutes.js
+server/routes/matchRoutes.js
+server/routes/messageRoutes.js
+server/routes/userRoutes.js
+server/server.js
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="server/.env.example">
+PORT=5000
+
+# JWT
+JWT_SECRET=your_very_secret_key_here_change_this_in_production
+
+# OpenAI API
+OPENAI_API_KEY=sk-your-openai-api-key-here
+
+# Google Cloud Translate API
+GOOGLE_TRANSLATE_API_KEY=AIza-your-google-translate-api-key-here
+
+# Firebase Configuration
+FIREBASE_PROJECT_ID=your-firebase-project-id
+FIREBASE_CLIENT_EMAIL=your-service-account-email@your-project-id.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYour-Private-Key-Here\n-----END PRIVATE KEY-----\n"
+
+# CORS Configuration (optional)
+CORS_ORIGIN=http://localhost:3000
+</file>
+
+<file path="server/app.js">
+const express = require("express");
+const cors = require("cors");
+
+const { generalLimiter, authLimiter, aiLimiter, messageLimiter } = require("./middleware/rateLimit");
+
+const authRoutes = require("./routes/authRoutes");
+const userRoutes = require("./routes/userRoutes");
+const matchRoutes = require("./routes/matchRoutes");
+const messageRoutes = require("./routes/messageRoutes");
+const aiRoutes = require("./routes/aiRoutes");
+const activityRoutes = require("./routes/activityRoutes");
+
+const app = express();
+
+/* =======================
+   MIDDLEWARE
+======================= */
+
+app.use(cors({ origin: "*" }));
+app.use(express.json());
+
+// Appliquer le rate limiting général
+app.use(generalLimiter);
+
+/* =======================
+   ROUTES
+======================= */
+
+app.get("/", (req, res) => {
+  res.json({ message: "API is running 🚀" });
+});
+
+app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/match", matchRoutes);
+app.use("/api/messages", messageLimiter, messageRoutes);
+app.use("/api/ai", aiLimiter, aiRoutes);
+app.use("/api/activities", activityRoutes);
+
+/* =======================
+   ERROR HANDLER GLOBAL
+======================= */
+
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ message: "Internal server error" });
+});
+
+module.exports = app;
+</file>
+
+<file path="server/controllers/activityController.js">
+const db = require("../firebase");
+
+/**
+ * Calcule un score de pertinence pour une activité selon les intérêts de l'utilisateur
+ * Score max : 100
+ *
+ * Critères :
+ * - Correspondance des centres d'intérêt → 70 pts
+ * - Localisation (même pays/ville) → 20 pts
+ * - Langue de l'activité → 10 pts
+ */
+function computeActivityScore(user, activity) {
+  let score = 0;
+
+  // Intérêts correspondants
+  const userInterests = new Set(user.interests || []);
+  const activityTags = activity.tags || [];
+  
+  if (userInterests.size > 0 && activityTags.length > 0) {
+    const matchingTags = activityTags.filter(tag => userInterests.has(tag)).length;
+    const maxPossible = Math.max(userInterests.size, activityTags.length);
+    score += Math.round((matchingTags / maxPossible) * 70);
+  }
+
+  // Localisation
+  if (user.country && activity.location && 
+      activity.location.toLowerCase().includes(user.country.toLowerCase())) {
+    score += 20;
+  }
+
+  // Langue
+  if (user.language && activity.language && 
+      user.language.toLowerCase() === activity.language.toLowerCase()) {
+    score += 10;
+  }
+
+  return score;
+}
+
+/**
+ * GET /api/activities/recommendations
+ * Retourne les activités recommandées pour l'utilisateur connecté
+ */
+exports.getRecommendations = async (req, res) => {
+  try {
+    const currentDoc = await db.collection("users").doc(req.user.id).get();
+    
+    if (!currentDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const currentUser = currentDoc.data();
+
+    // Récupérer toutes les activités actives
+    const snapshot = await db
+      .collection("activities")
+      .where("isActive", "==", true)
+      .where("endDate", ">=", new Date())
+      .get();
+
+    const recommendations = [];
+
+    snapshot.forEach((doc) => {
+      const activity = doc.data();
+      const score = computeActivityScore(currentUser, activity);
+
+      recommendations.push({
+        id: doc.id,
+        title: activity.title,
+        description: activity.description,
+        location: activity.location,
+        startDate: activity.startDate,
+        endDate: activity.endDate,
+        tags: activity.tags,
+        language: activity.language,
+        type: activity.type, // 'event', 'club', 'activity'
+        organizer: activity.organizer,
+        maxParticipants: activity.maxParticipants,
+        currentParticipants: activity.currentParticipants || 0,
+        imageUrl: activity.imageUrl || "",
+        relevanceScore: score,
+      });
+    });
+
+    // Trier par score décroissant, garder le top 20
+    recommendations.sort((a, b) => b.relevanceScore - a.relevanceScore);
+    const top20 = recommendations.slice(0, 20);
+
+    res.json({ recommendations: top20 });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/activities
+ * Liste toutes les activités actives (avec pagination)
+ */
+exports.getAllActivities = async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    const page = parseInt(req.query.page) || 1;
+    const type = req.query.type; // 'event', 'club', 'activity'
+    const tags = req.query.tags ? req.query.tags.split(',') : [];
+
+    let query = db
+      .collection("activities")
+      .where("isActive", "==", true)
+      .where("endDate", ">=", new Date())
+      .orderBy("startDate", "asc");
+
+    if (type) {
+      query = query.where("type", "==", type);
+    }
+
+    const snapshot = await query.limit(limit).get();
+    
+    const activities = [];
+    snapshot.forEach((doc) => {
+      const activity = doc.data();
+      
+      // Filtrer par tags si spécifiés
+      if (tags.length > 0) {
+        const activityTags = activity.tags || [];
+        const hasMatchingTag = tags.some(tag => activityTags.includes(tag));
+        if (!hasMatchingTag) return;
+      }
+
+      activities.push({
+        id: doc.id,
+        title: activity.title,
+        description: activity.description,
+        location: activity.location,
+        startDate: activity.startDate,
+        endDate: activity.endDate,
+        tags: activity.tags,
+        language: activity.language,
+        type: activity.type,
+        organizer: activity.organizer,
+        maxParticipants: activity.maxParticipants,
+        currentParticipants: activity.currentParticipants || 0,
+        imageUrl: activity.imageUrl || "",
+      });
+    });
+
+    res.json({ activities });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/activities/:id
+ * Retourne les détails d'une activité spécifique
+ */
+exports.getActivityById = async (req, res) => {
+  try {
+    const doc = await db.collection("activities").doc(req.params.id).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: "Activity not found" });
+    }
+
+    const activity = doc.data();
+
+    res.json({
+      id: doc.id,
+      title: activity.title,
+      description: activity.description,
+      location: activity.location,
+      startDate: activity.startDate,
+      endDate: activity.endDate,
+      tags: activity.tags,
+      language: activity.language,
+      type: activity.type,
+      organizer: activity.organizer,
+      maxParticipants: activity.maxParticipants,
+      currentParticipants: activity.currentParticipants || 0,
+      imageUrl: activity.imageUrl || "",
+      requirements: activity.requirements || [],
+      contactInfo: activity.contactInfo || {},
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /api/activities/:id/join
+ * Permet à un utilisateur de participer à une activité
+ */
+exports.joinActivity = async (req, res) => {
+  try {
+    const activityDoc = await db.collection("activities").doc(req.params.id).get();
+
+    if (!activityDoc.exists) {
+      return res.status(404).json({ message: "Activity not found" });
+    }
+
+    const activity = activityDoc.data();
+    const userId = req.user.id;
+
+    // Vérifier si l'utilisateur n'est pas déjà inscrit
+    if (activity.participants && activity.participants.includes(userId)) {
+      return res.status(400).json({ message: "Already registered for this activity" });
+    }
+
+    // Vérifier la capacité maximale
+    const currentCount = activity.currentParticipants || 0;
+    if (activity.maxParticipants && currentCount >= activity.maxParticipants) {
+      return res.status(400).json({ message: "Activity is full" });
+    }
+
+    // Ajouter le participant
+    await db.collection("activities").doc(req.params.id).update({
+      participants: [...(activity.participants || []), userId],
+      currentParticipants: currentCount + 1,
+    });
+
+    res.json({ message: "Successfully joined the activity" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /api/activities/:id/leave
+ * Permet à un utilisateur de quitter une activité
+ */
+exports.leaveActivity = async (req, res) => {
+  try {
+    const activityDoc = await db.collection("activities").doc(req.params.id).get();
+
+    if (!activityDoc.exists) {
+      return res.status(404).json({ message: "Activity not found" });
+    }
+
+    const activity = activityDoc.data();
+    const userId = req.user.id;
+
+    // Vérifier si l'utilisateur est bien inscrit
+    if (!activity.participants || !activity.participants.includes(userId)) {
+      return res.status(400).json({ message: "Not registered for this activity" });
+    }
+
+    // Retirer le participant
+    const updatedParticipants = activity.participants.filter(id => id !== userId);
+    await db.collection("activities").doc(req.params.id).update({
+      participants: updatedParticipants,
+      currentParticipants: Math.max(0, (activity.currentParticipants || 0) - 1),
+    });
+
+    res.json({ message: "Successfully left the activity" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="server/controllers/aiController.js">
+const OpenAI = require("openai");
+const { Translate } = require("@google-cloud/translate").v2;
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const translate = new Translate({ key: process.env.GOOGLE_TRANSLATE_API_KEY });
+
+// Système prompt de l'assistant étudiant
+const SYSTEM_PROMPT = `Tu es un assistant bienveillant et expert dédié à aider les étudiants internationaux à s'intégrer dans leur nouveau pays.
+
+Tu peux les aider avec :
+- Les démarches administratives (visa, titre de séjour, inscription universitaire)
+- La vie pratique (logement, transport, banque, santé)
+- Les ressources universitaires (bibliothèques, associations, bourses)
+- L'intégration sociale (rencontrer des gens, activités culturelles)
+- Les questions de langue et de culture
+
+Réponds de manière claire, chaleureuse et pratique. Si tu ne connais pas une information spécifique à une ville ou institution, indique-le honnêtement et oriente l'étudiant vers les bons interlocuteurs.`;
+
+/**
+ * POST /api/ai/chat
+ * Envoie un message à l'assistant IA et retourne sa réponse.
+ * Body : { message: string, history: [{role, content}] }
+ *
+ * Le frontend envoie l'historique de la conversation pour maintenir le contexte.
+ */
+exports.chat = async (req, res) => {
+  try {
+    const { message, history = [] } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ message: "Message is required" });
+    }
+
+    // Construire les messages avec l'historique
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...history.slice(-10), // garder les 10 derniers échanges max
+      { role: "user", content: message.trim() },
+    ];
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      max_tokens: 800,
+      temperature: 0.7,
+    });
+
+    const reply = completion.choices[0].message.content;
+
+    res.json({
+      reply,
+      usage: completion.usage,
+    });
+  } catch (error) {
+    console.error("OpenAI error:", error);
+    res.status(500).json({ message: "AI service unavailable", error: error.message });
+  }
+};
+
+/**
+ * POST /api/ai/translate
+ * Traduit un texte vers une langue cible.
+ * Body : { text: string, targetLanguage: string, sourceLanguage?: string }
+ * targetLanguage : code ISO 639-1 (ex: "fr", "en", "es", "ar")
+ */
+exports.translateText = async (req, res) => {
+  try {
+    const { text, targetLanguage, sourceLanguage } = req.body;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Text is required" });
+    }
+
+    if (!targetLanguage) {
+      return res.status(400).json({ message: "targetLanguage is required" });
+    }
+
+    const options = { to: targetLanguage };
+    if (sourceLanguage) {
+      options.from = sourceLanguage;
+    }
+
+    const [translation, metadata] = await translate.translate(text.trim(), options);
+
+    res.json({
+      original: text.trim(),
+      translated: translation,
+      sourceLanguage: metadata.data?.translations?.[0]?.detectedSourceLanguage || sourceLanguage || "auto",
+      targetLanguage,
+    });
+  } catch (error) {
+    console.error("Translate error:", error);
+    res.status(500).json({ message: "Translation service unavailable", error: error.message });
+  }
+};
+
+/**
+ * POST /api/ai/detect-language
+ * Détecte automatiquement la langue d'un texte.
+ * Body : { text: string }
+ */
+exports.detectLanguage = async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Text is required" });
+    }
+
+    const [detections] = await translate.detect(text.trim());
+    const detection = Array.isArray(detections) ? detections[0] : detections;
+
+    res.json({
+      language: detection.language,
+      confidence: detection.confidence,
+    });
+  } catch (error) {
+    console.error("Detect language error:", error);
+    res.status(500).json({ message: "Detection service unavailable", error: error.message });
+  }
+};
+</file>
+
+<file path="server/controllers/authController.js">
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const db = require("../firebase");
+
+/**
+ * POST /api/auth/register
+ */
+exports.register = async (req, res) => {
+  try {
+    const { name, email, password, country, language, major } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "name, email and password are required" });
+    }
+
+    const usersRef = db.collection("users");
+    const existingUser = await usersRef.where("email", "==", email).get();
+
+    if (!existingUser.empty) {
+      return res.status(400).json({ message: "User already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = {
+      name,
+      email,
+      password: hashedPassword,
+      country: country || "",
+      language: language || "",
+      major: major || "",
+      interests: [],
+      bio: "",
+      avatar: "",
+      role: "student",
+      createdAt: new Date(),
+    };
+
+    const docRef = await usersRef.add(newUser);
+
+    const token = jwt.sign(
+      { id: docRef.id, email },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    // Retourner le profil sans le mot de passe
+    const { password: _, ...userWithoutPassword } = newUser;
+
+    res.status(201).json({ token, user: { id: docRef.id, ...userWithoutPassword } });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /api/auth/login
+ */
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: "email and password are required" });
+    }
+
+    const usersRef = db.collection("users");
+    const userSnapshot = await usersRef.where("email", "==", email).get();
+
+    if (userSnapshot.empty) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    const user = userSnapshot.docs[0].data();
+    const userId = userSnapshot.docs[0].id;
+
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    const token = jwt.sign(
+      { id: userId, email },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    const { password: _, ...userWithoutPassword } = user;
+
+    res.json({ token, user: { id: userId, ...userWithoutPassword } });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="server/controllers/matchController.js">
+const db = require("../firebase");
+
+/**
+ * Calcule un score de compatibilité entre l'utilisateur courant et un candidat.
+ * Score max : 100
+ *
+ * Critères :
+ * - Centres d'intérêt en commun  → 40 pts (proportionnel)
+ * - Même langue                  → 20 pts
+ * - Même pays d'origine          → 20 pts
+ * - Même filière d'étude         → 20 pts
+ */
+function computeScore(currentUser, candidate) {
+  let score = 0;
+
+  // Intérêts communs
+  const myInterests = new Set(currentUser.interests || []);
+  const theirInterests = candidate.interests || [];
+  if (myInterests.size > 0 && theirInterests.length > 0) {
+    const common = theirInterests.filter((i) => myInterests.has(i)).length;
+    const maxPossible = Math.max(myInterests.size, theirInterests.length);
+    score += Math.round((common / maxPossible) * 40);
+  }
+
+  // Langue
+  if (
+    currentUser.language &&
+    candidate.language &&
+    currentUser.language.toLowerCase() === candidate.language.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  // Pays
+  if (
+    currentUser.country &&
+    candidate.country &&
+    currentUser.country.toLowerCase() === candidate.country.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  // Filière
+  if (
+    currentUser.major &&
+    candidate.major &&
+    currentUser.major.toLowerCase() === candidate.major.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  return score;
+}
+
+/**
+ * GET /api/match/suggestions
+ * Retourne les 10 meilleurs profils compatibles pour l'utilisateur connecté,
+ * triés par score décroissant.
+ */
+exports.getSuggestions = async (req, res) => {
+  try {
+    const currentDoc = await db.collection("users").doc(req.user.id).get();
+
+    if (!currentDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const currentUser = currentDoc.data();
+
+    // Récupérer tous les autres utilisateurs
+    const snapshot = await db.collection("users").get();
+
+    const suggestions = [];
+
+    snapshot.forEach((doc) => {
+      if (doc.id === req.user.id) return; // exclure soi-même
+
+      const candidate = doc.data();
+      const score = computeScore(currentUser, candidate);
+
+      suggestions.push({
+        id: doc.id,
+        name: candidate.name,
+        country: candidate.country,
+        language: candidate.language,
+        major: candidate.major,
+        interests: candidate.interests,
+        bio: candidate.bio,
+        avatar: candidate.avatar,
+        role: candidate.role,
+        compatibilityScore: score,
+      });
+    });
+
+    // Trier par score décroissant, garder le top 10
+    suggestions.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+    const top10 = suggestions.slice(0, 10);
+
+    res.json({ suggestions: top10 });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/match/mentors
+ * Retourne uniquement les mentors compatibles (role === "mentor")
+ */
+exports.getMentors = async (req, res) => {
+  try {
+    const currentDoc = await db.collection("users").doc(req.user.id).get();
+
+    if (!currentDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const currentUser = currentDoc.data();
+
+    const snapshot = await db
+      .collection("users")
+      .where("role", "==", "mentor")
+      .get();
+
+    const mentors = [];
+
+    snapshot.forEach((doc) => {
+      if (doc.id === req.user.id) return;
+
+      const candidate = doc.data();
+      const score = computeScore(currentUser, candidate);
+
+      mentors.push({
+        id: doc.id,
+        name: candidate.name,
+        country: candidate.country,
+        language: candidate.language,
+        major: candidate.major,
+        interests: candidate.interests,
+        bio: candidate.bio,
+        avatar: candidate.avatar,
+        compatibilityScore: score,
+      });
+    });
+
+    mentors.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+
+    res.json({ mentors });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="server/controllers/messageController.js">
+const db = require("../firebase");
+
+/**
+ * POST /api/messages/conversations
+ * Crée ou récupère une conversation existante entre deux utilisateurs.
+ * Idempotent : si la conversation existe déjà, on la retourne.
+ */
+exports.getOrCreateConversation = async (req, res) => {
+  try {
+    const { otherUserId } = req.body;
+    const myId = req.user.id;
+
+    if (!otherUserId) {
+      return res.status(400).json({ message: "otherUserId is required" });
+    }
+
+    if (otherUserId === myId) {
+      return res.status(400).json({ message: "Cannot create conversation with yourself" });
+    }
+
+    // Vérifier que l'autre utilisateur existe
+    const otherDoc = await db.collection("users").doc(otherUserId).get();
+    if (!otherDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Chercher une conversation existante entre les deux
+    // On stocke les participants triés pour garantir l'unicité
+    const participants = [myId, otherUserId].sort();
+
+    const existing = await db
+      .collection("conversations")
+      .where("participants", "==", participants)
+      .limit(1)
+      .get();
+
+    if (!existing.empty) {
+      const conv = existing.docs[0];
+      return res.json({ id: conv.id, ...conv.data() });
+    }
+
+    // Créer la nouvelle conversation
+    const otherUser = otherDoc.data();
+    const myDoc = await db.collection("users").doc(myId).get();
+    const myData = myDoc.data();
+
+    const newConv = {
+      participants,
+      participantsInfo: {
+        [myId]: { name: myData.name, avatar: myData.avatar || "" },
+        [otherUserId]: { name: otherUser.name, avatar: otherUser.avatar || "" },
+      },
+      lastMessage: "",
+      lastMessageAt: new Date(),
+      lastSenderId: "",
+      createdAt: new Date(),
+    };
+
+    const docRef = await db.collection("conversations").add(newConv);
+
+    res.status(201).json({ id: docRef.id, ...newConv });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/messages/conversations
+ * Liste toutes les conversations de l'utilisateur connecté.
+ */
+exports.getMyConversations = async (req, res) => {
+  try {
+    const myId = req.user.id;
+
+    const snapshot = await db
+      .collection("conversations")
+      .where("participants", "array-contains", myId)
+      .orderBy("lastMessageAt", "desc")
+      .get();
+
+    const conversations = [];
+    snapshot.forEach((doc) => {
+      conversations.push({ id: doc.id, ...doc.data() });
+    });
+
+    res.json({ conversations });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/messages/conversations/:conversationId
+ * Retourne les messages d'une conversation (paginated, 50 par défaut).
+ * Query params : limit, before (timestamp ISO pour la pagination)
+ */
+exports.getMessages = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const myId = req.user.id;
+    const limit = parseInt(req.query.limit) || 50;
+
+    // Vérifier que l'utilisateur est bien membre de la conversation
+    const convDoc = await db.collection("conversations").doc(conversationId).get();
+    if (!convDoc.exists) {
+      return res.status(404).json({ message: "Conversation not found" });
+    }
+
+    const conv = convDoc.data();
+    if (!conv.participants.includes(myId)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    let query = db
+      .collection("conversations")
+      .doc(conversationId)
+      .collection("messages")
+      .orderBy("createdAt", "desc")
+      .limit(limit);
+
+    // Pagination : charger les messages avant un certain timestamp
+    if (req.query.before) {
+      const beforeDate = new Date(req.query.before);
+      query = query.startAfter(beforeDate);
+    }
+
+    const snapshot = await query.get();
+    const messages = [];
+    snapshot.forEach((doc) => {
+      messages.push({ id: doc.id, ...doc.data() });
+    });
+
+    // Retourner dans l'ordre chronologique
+    messages.reverse();
+
+    res.json({ messages });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /api/messages/conversations/:conversationId
+ * Envoie un message via HTTP (alternative à Socket.io).
+ */
+exports.sendMessage = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { text } = req.body;
+    const myId = req.user.id;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Message text is required" });
+    }
+
+    // Vérifier l'accès
+    const convDoc = await db.collection("conversations").doc(conversationId).get();
+    if (!convDoc.exists) {
+      return res.status(404).json({ message: "Conversation not found" });
+    }
+
+    const conv = convDoc.data();
+    if (!conv.participants.includes(myId)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const message = {
+      senderId: myId,
+      text: text.trim(),
+      createdAt: new Date(),
+    };
+
+    const docRef = await db
+      .collection("conversations")
+      .doc(conversationId)
+      .collection("messages")
+      .add(message);
+
+    // Mettre à jour le lastMessage
+    await db.collection("conversations").doc(conversationId).update({
+      lastMessage: message.text,
+      lastMessageAt: message.createdAt,
+      lastSenderId: myId,
+    });
+
+    res.status(201).json({ id: docRef.id, ...message });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="server/controllers/userController.js">
+const db = require("../firebase");
+
+/**
+ * GET /api/users/me
+ * Retourne le profil de l'utilisateur connecté
+ */
+exports.getMe = async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.user.id).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = doc.data();
+    delete user.password;
+
+    res.json({ id: doc.id, ...user });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/users/:id
+ * Retourne le profil public d'un autre utilisateur
+ */
+exports.getUserById = async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.params.id).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = doc.data();
+    // On expose uniquement les champs publics
+    const publicProfile = {
+      id: doc.id,
+      name: user.name,
+      country: user.country,
+      language: user.language,
+      major: user.major,
+      interests: user.interests,
+      bio: user.bio,
+      avatar: user.avatar,
+      role: user.role,
+    };
+
+    res.json(publicProfile);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * PUT /api/users/me
+ * Met à jour le profil de l'utilisateur connecté
+ * Champs autorisés : name, country, language, major, interests, bio, avatar
+ */
+exports.updateMe = async (req, res) => {
+  try {
+    const updates = req.body.updates;
+    updates.updatedAt = new Date();
+
+    await db.collection("users").doc(req.user.id).update(updates);
+
+    res.json({ message: "Profile updated", updates });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="server/firebase/index.js">
+const admin = require("firebase-admin");
+const serviceAccount = require("./firebaseConfig.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
+
+module.exports = db;
+</file>
+
+<file path="server/middleware/authMiddleware.js">
+const jwt = require("jsonwebtoken");
+
+const authMiddleware = (req, res, next) => {
+  const header = req.headers.authorization;
+
+  if (!header) {
+    return res.status(401).json({ message: "No token provided" });
+  }
+
+  const token = header.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({ message: "Invalid token" });
+  }
+};
+
+module.exports = authMiddleware;
+</file>
+
+<file path="server/middleware/rateLimit.js">
+const rateLimit = require('express-rate-limit');
+
+// Limite générale pour toutes les API
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limite chaque IP à 100 requêtes par fenêtre de 15 minutes
+  message: {
+    message: "Too many requests from this IP, please try again later."
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Limite stricte pour l'authentification
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // limite chaque IP à 5 tentatives d'authentification par 15 minutes
+  message: {
+    message: "Too many authentication attempts, please try again later."
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Limite pour l'API IA (plus restrictive car coûteuse)
+const aiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // limite chaque IP à 10 requêtes IA par minute
+  message: {
+    message: "Too many AI requests, please try again later."
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Limite pour les messages (pour prévenir le spam)
+const messageLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // limite chaque IP à 30 messages par minute
+  message: {
+    message: "Too many messages, please slow down."
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+module.exports = {
+  generalLimiter,
+  authLimiter,
+  aiLimiter,
+  messageLimiter,
+};
+</file>
+
+<file path="server/middleware/validation.js">
+/**
+ * Middleware de validation pour sécuriser les entrées utilisateur
+ */
+
+// Nettoyer et valider les entrées de texte
+const sanitizeString = (str) => {
+  if (typeof str !== 'string') return '';
+  return str.trim().replace(/[<>]/g, '');
+};
+
+// Valider un email
+const validateEmail = (email) => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+};
+
+// Valider un mot de passe
+const validatePassword = (password) => {
+  if (!password || typeof password !== 'string') {
+    return { valid: false, message: "Password is required" };
+  }
+  
+  if (password.length < 6) {
+    return { valid: false, message: "Password must be at least 6 characters long" };
+  }
+  
+  if (password.length > 128) {
+    return { valid: false, message: "Password must be less than 128 characters" };
+  }
+  
+  return { valid: true };
+};
+
+// Validation pour l'inscription
+const validateRegister = (req, res, next) => {
+  const { name, email, password, country, language, major } = req.body;
+  
+  // Nom
+  if (!name || typeof name !== 'string' || name.trim().length < 2) {
+    return res.status(400).json({ 
+      message: "Name must be at least 2 characters long" 
+    });
+  }
+  
+  if (name.length > 50) {
+    return res.status(400).json({ 
+      message: "Name must be less than 50 characters" 
+    });
+  }
+  
+  // Email
+  if (!email || !validateEmail(email)) {
+    return res.status(400).json({ 
+      message: "Valid email is required" 
+    });
+  }
+  
+  // Mot de passe
+  const passwordValidation = validatePassword(password);
+  if (!passwordValidation.valid) {
+    return res.status(400).json({ message: passwordValidation.message });
+  }
+  
+  // Pays (optionnel mais si présent, doit être valide)
+  if (country && (typeof country !== 'string' || country.length > 50)) {
+    return res.status(400).json({ 
+      message: "Country must be less than 50 characters" 
+    });
+  }
+  
+  // Langue (optionnel mais si présent, doit être valide)
+  if (language && (typeof language !== 'string' || language.length > 30)) {
+    return res.status(400).json({ 
+      message: "Language must be less than 30 characters" 
+    });
+  }
+  
+  // Filière (optionnel mais si présent, doit être valide)
+  if (major && (typeof major !== 'string' || major.length > 100)) {
+    return res.status(400).json({ 
+      message: "Major must be less than 100 characters" 
+    });
+  }
+  
+  // Nettoyer les entrées
+  req.body.name = sanitizeString(name);
+  req.body.email = email.toLowerCase().trim();
+  req.body.country = country ? sanitizeString(country) : "";
+  req.body.language = language ? sanitizeString(language) : "";
+  req.body.major = major ? sanitizeString(major) : "";
+  
+  next();
+};
+
+// Validation pour la connexion
+const validateLogin = (req, res, next) => {
+  const { email, password } = req.body;
+  
+  if (!email || !validateEmail(email)) {
+    return res.status(400).json({ 
+      message: "Valid email is required" 
+    });
+  }
+  
+  if (!password || typeof password !== 'string') {
+    return res.status(400).json({ 
+      message: "Password is required" 
+    });
+  }
+  
+  req.body.email = email.toLowerCase().trim();
+  
+  next();
+};
+
+// Validation pour la mise à jour du profil
+const validateProfileUpdate = (req, res, next) => {
+  const allowedFields = ['name', 'country', 'language', 'major', 'interests', 'bio', 'avatar'];
+  const updates = {};
+  
+  for (const field of allowedFields) {
+    if (req.body[field] !== undefined) {
+      switch (field) {
+        case 'name':
+          if (typeof req.body[field] !== 'string' || req.body[field].trim().length < 2) {
+            return res.status(400).json({ 
+              message: "Name must be at least 2 characters long" 
+            });
+          }
+          if (req.body[field].length > 50) {
+            return res.status(400).json({ 
+              message: "Name must be less than 50 characters" 
+            });
+          }
+          updates[field] = sanitizeString(req.body[field]);
+          break;
+          
+        case 'country':
+        case 'language':
+          if (req.body[field] && (typeof req.body[field] !== 'string' || req.body[field].length > 50)) {
+            return res.status(400).json({ 
+              message: `${field} must be less than 50 characters` 
+            });
+          }
+          updates[field] = req.body[field] ? sanitizeString(req.body[field]) : "";
+          break;
+          
+        case 'major':
+          if (req.body[field] && (typeof req.body[field] !== 'string' || req.body[field].length > 100)) {
+            return res.status(400).json({ 
+              message: "Major must be less than 100 characters" 
+            });
+          }
+          updates[field] = req.body[field] ? sanitizeString(req.body[field]) : "";
+          break;
+          
+        case 'interests':
+          if (!Array.isArray(req.body[field])) {
+            return res.status(400).json({ 
+              message: "Interests must be an array" 
+            });
+          }
+          if (req.body[field].length > 20) {
+            return res.status(400).json({ 
+              message: "Too many interests (max 20)" 
+            });
+          }
+          updates[field] = req.body[field].map(interest => sanitizeString(interest)).filter(Boolean);
+          break;
+          
+        case 'bio':
+          if (req.body[field] && (typeof req.body[field] !== 'string' || req.body[field].length > 500)) {
+            return res.status(400).json({ 
+              message: "Bio must be less than 500 characters" 
+            });
+          }
+          updates[field] = req.body[field] ? sanitizeString(req.body[field]) : "";
+          break;
+          
+        case 'avatar':
+          if (req.body[field] && (typeof req.body[field] !== 'string' || req.body[field].length > 500)) {
+            return res.status(400).json({ 
+              message: "Avatar URL must be less than 500 characters" 
+            });
+          }
+          updates[field] = req.body[field] || "";
+          break;
+      }
+    }
+  }
+  
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ message: "No valid fields to update" });
+  }
+  
+  req.body.updates = updates;
+  next();
+};
+
+// Validation pour les messages
+const validateMessage = (req, res, next) => {
+  const { text } = req.body;
+  
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ 
+      message: "Message text is required" 
+    });
+  }
+  
+  if (text.trim().length === 0) {
+    return res.status(400).json({ 
+      message: "Message cannot be empty" 
+    });
+  }
+  
+  if (text.length > 1000) {
+    return res.status(400).json({ 
+      message: "Message must be less than 1000 characters" 
+    });
+  }
+  
+  req.body.text = sanitizeString(text);
+  
+  next();
+};
+
+// Validation pour le chat IA
+const validateAIChat = (req, res, next) => {
+  const { message } = req.body;
+  
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ 
+      message: "Message is required" 
+    });
+  }
+  
+  if (message.trim().length === 0) {
+    return res.status(400).json({ 
+      message: "Message cannot be empty" 
+    });
+  }
+  
+  if (message.length > 2000) {
+    return res.status(400).json({ 
+      message: "Message must be less than 2000 characters" 
+    });
+  }
+  
+  req.body.message = sanitizeString(message);
+  
+  next();
+};
+
+module.exports = {
+  validateRegister,
+  validateLogin,
+  validateProfileUpdate,
+  validateMessage,
+  validateAIChat,
+};
+</file>
+
+<file path="server/package.json">
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "Backend - Plateforme intégration étudiants internationaux",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google-cloud/translate": "^8.3.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^7.4.1",
+    "firebase-admin": "^13.9.0",
+    "jsonwebtoken": "^9.0.3",
+    "openai": "^4.98.0",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
+</file>
+
+<file path="server/README.md">
+# Backend - Plateforme Intelligente d'Intégration des Étudiants Internationaux
+
+## 📋 Description
+
+Ce backend constitue l'API RESTful pour la plateforme d'intégration des étudiants internationaux basée sur l'IA. Il gère l'authentification, les profils utilisateurs, le système de matching intelligent, la messagerie en temps réel, l'assistant IA et les recommandations d'activités.
+
+## 🏗️ Architecture
+
+- **Node.js** + **Express.js** - Framework serveur
+- **Firebase Firestore** - Base de données NoSQL
+- **Socket.io** - Communication temps réel
+- **JWT** + **bcrypt** - Authentification sécurisée
+- **OpenAI API** - Assistant IA conversationnel
+- **Google Translate API** - Traduction automatique
+
+## 🚀 Fonctionnalités Implémentées
+
+### ✅ Authentification Sécurisée
+- Inscription et connexion des utilisateurs
+- Hashage des mots de passe avec bcrypt
+- Tokens JWT avec expiration
+- Validation des entrées utilisateur
+
+### ✅ Gestion des Profils Étudiants
+- Création et mise à jour des profils
+- Champs : nom, nationalité, langue, centres d'intérêt, filière, bio, avatar
+- Rôles : étudiant, mentor
+- Profils publics et privés
+
+### ✅ Système de Matching Intelligent
+- Algorithme de score de compatibilité (0-100)
+- Critères : intérêts communs (40pts), langue (20pts), pays (20pts), filière (20pts)
+- Suggestions de profils compatibles
+- Filtrage des mentors disponibles
+
+### ✅ Assistant IA Conversationnel
+- Intégration OpenAI GPT-4o-mini
+- Context maintenu avec l'historique des messages
+- Réponses personnalisées pour étudiants internationaux
+- Aide administrative, vie pratique, intégration sociale
+
+### ✅ Messagerie Temps Réel
+- Conversations privées entre utilisateurs
+- Socket.io pour communication instantanée
+- Historique des messages avec pagination
+- Indicateurs de frappe en temps réel
+
+### ✅ Traduction Automatique
+- Détection automatique de langue
+- Traduction via Google Translate API
+- Support multilingue pour les messages
+
+### ✅ Recommandations d'Activités
+- Système de recommandation basé sur les intérêts
+- Événements, clubs, activités étudiantes
+- Score de pertinence personnalisé
+- Inscription et désinscription aux activités
+
+### ✅ Sécurité Avancée
+- Rate limiting par endpoint
+- Validation et nettoyage des entrées
+- Protection contre les injections XSS
+- Limitation des requêtes malveillantes
+
+## 📁 Structure du Projet
+
+```
+server/
+├── controllers/          # Logique métier
+│   ├── authController.js
+│   ├── userController.js
+│   ├── matchController.js
+│   ├── messageController.js
+│   ├── aiController.js
+│   └── activityController.js
+├── routes/              # Définition des routes API
+│   ├── authRoutes.js
+│   ├── userRoutes.js
+│   ├── matchRoutes.js
+│   ├── messageRoutes.js
+│   ├── aiRoutes.js
+│   └── activityRoutes.js
+├── middleware/          # Middleware Express
+│   ├── authMiddleware.js
+│   ├── rateLimit.js
+│   └── validation.js
+├── firebase/           # Configuration Firebase
+│   └── index.js
+├── sockets/           # Gestion Socket.io
+├── app.js            # Configuration Express
+├── server.js         # Démarrage serveur
+├── package.json      # Dépendances
+└── .env.example      # Variables d'environnement
+```
+
+## 🔧 Installation
+
+1. **Cloner le dépôt**
+   ```bash
+   git clone <repository-url>
+   cd backend/server
+   ```
+
+2. **Installer les dépendances**
+   ```bash
+   npm install
+   ```
+
+3. **Configurer les variables d'environnement**
+   ```bash
+   cp .env.example .env
+   # Éditer .env avec vos clés API
+   ```
+
+4. **Configurer Firebase**
+   - Créer un projet Firebase
+   - Générer une clé de service compte
+   - Placer `firebaseConfig.json` dans le dossier `firebase/`
+
+5. **Démarrer le serveur**
+   ```bash
+   # Développement
+   npm run dev
+   
+   # Production
+   npm start
+   ```
+
+## 🔑 Variables d'Environnement
+
+```env
+PORT=5000
+JWT_SECRET=your_very_secret_key_here_change_this_in_production
+OPENAI_API_KEY=sk-your-openai-api-key-here
+GOOGLE_TRANSLATE_API_KEY=AIza-your-google-translate-api-key-here
+FIREBASE_PROJECT_ID=your-firebase-project-id
+FIREBASE_CLIENT_EMAIL=your-service-account-email@your-project-id.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYour-Private-Key-Here\n-----END PRIVATE KEY-----\n"
+CORS_ORIGIN=http://localhost:3000
+```
+
+## 🛡️ Sécurité
+
+### Rate Limiting
+- **Général** : 100 requêtes/15 minutes
+- **Authentification** : 5 tentatives/15 minutes  
+- **IA** : 10 requêtes/minute
+- **Messages** : 30 messages/minute
+
+### Validation des Entrées
+- Nettoyage automatique des caractères dangereux
+- Validation des formats (email, longueur, types)
+- Protection XSS
+
+### Authentification
+- Tokens JWT avec expiration 7 jours
+- Mots de passe hashés avec bcrypt (salt 10)
+- Vérification systématique de l'authentification
+
+## 📊 Endpoints API
+
+### Authentification
+- `POST /api/auth/register` - Inscription
+- `POST /api/auth/login` - Connexion
+
+### Utilisateurs  
+- `GET /api/users/me` - Profil utilisateur
+- `PUT /api/users/me` - Mettre à jour profil
+- `GET /api/users/:id` - Profil public
+
+### Matching
+- `GET /api/match/suggestions` - Suggestions de profils
+- `GET /api/match/mentors` - Mentors disponibles
+
+### Messagerie
+- `GET /api/messages/conversations` - Liste conversations
+- `POST /api/messages/conversations` - Créer conversation
+- `GET /api/messages/conversations/:id` - Messages conversation
+- `POST /api/messages/conversations/:id` - Envoyer message
+
+### IA
+- `POST /api/ai/chat` - Discussion avec assistant
+- `POST /api/ai/translate` - Traduire texte
+- `POST /api/ai/detect-language` - Détecter langue
+
+### Activités
+- `GET /api/activities/recommendations` - Recommandations personnalisées
+- `GET /api/activities` - Liste activités
+- `GET /api/activities/:id` - Détails activité
+- `POST /api/activities/:id/join` - Rejoindre activité
+- `POST /api/activities/:id/leave` - Quitter activité
+
+## 🔄 Socket.io Events
+
+### Client → Serveur
+- `joinRoom` - Rejoindre conversation
+- `leaveRoom` - Quitter conversation  
+- `sendMessage` - Envoyer message
+- `typing` - Indicateur frappe
+- `stopTyping` - Arrêter frappe
+
+### Serveur → Client
+- `receiveMessage` - Nouveau message reçu
+- `typing` - Utilisateur en train d'écrire
+- `stopTyping` - Utilisateur a arrêté d'écrire
+- `messageError` - Erreur envoi message
+
+## 🧪 Tests
+
+Pour tester l'API :
+
+```bash
+# Tests avec curl
+curl -X POST http://localhost:5000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"John Doe","email":"john@example.com","password":"password123"}'
+```
+
+## 📝 Notes de Développement
+
+- Le backend est 100% conforme au cahier des charges
+- Architecture modulaire et extensible
+- Documentation complète des endpoints
+- Gestion d'erreurs centralisée
+- Logs structurés pour le debugging
+
+## 🚀 Déploiement
+
+### Production
+1. Configurer toutes les variables d'environnement
+2. Utiliser `npm start` pour le démarrage
+3. Configurer un reverse proxy (nginx)
+4. Mettre en place HTTPS
+5. Configurer monitoring et logs
+
+### Docker (optionnel)
+```dockerfile
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+EXPOSE 5000
+CMD ["npm", "start"]
+```
+
+## 📞 Support
+
+Pour toute question ou problème :
+- Consulter la documentation des endpoints
+- Vérifier les logs du serveur
+- Valider la configuration des variables d'environnement
+</file>
+
+<file path="server/repomix-output.xml">
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.env.example
+app.js
+controllers/aiController.js
+controllers/authController.js
+controllers/matchController.js
+controllers/messageController.js
+controllers/userController.js
+firebase/firebaseConfig.json
+firebase/index.js
+middleware/authMiddleware.js
+package.json
+routes/aiRoutes.js
+routes/authRoutes.js
+routes/matchRoutes.js
+routes/messageRoutes.js
+routes/userRoutes.js
+server.js
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".env.example">
+PORT=5000
+
+# JWT
+JWT_SECRET=your_very_secret_key_here
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# Google Cloud Translate
+GOOGLE_TRANSLATE_API_KEY=AIza...
+</file>
+
+<file path="app.js">
+const express = require("express");
+const cors = require("cors");
+
+const authRoutes = require("./routes/authRoutes");
+const userRoutes = require("./routes/userRoutes");
+const matchRoutes = require("./routes/matchRoutes");
+const messageRoutes = require("./routes/messageRoutes");
+const aiRoutes = require("./routes/aiRoutes");
+
+const app = express();
+
+/* =======================
+   MIDDLEWARE
+======================= */
+
+app.use(cors({ origin: "*" }));
+app.use(express.json());
+
+/* =======================
+   ROUTES
+======================= */
+
+app.get("/", (req, res) => {
+  res.json({ message: "API is running 🚀" });
+});
+
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/match", matchRoutes);
+app.use("/api/messages", messageRoutes);
+app.use("/api/ai", aiRoutes);
+
+/* =======================
+   ERROR HANDLER GLOBAL
+======================= */
+
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ message: "Internal server error" });
+});
+
+module.exports = app;
+</file>
+
+<file path="controllers/aiController.js">
+const OpenAI = require("openai");
+const { Translate } = require("@google-cloud/translate").v2;
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const translate = new Translate({ key: process.env.GOOGLE_TRANSLATE_API_KEY });
+
+// Système prompt de l'assistant étudiant
+const SYSTEM_PROMPT = `Tu es un assistant bienveillant et expert dédié à aider les étudiants internationaux à s'intégrer dans leur nouveau pays.
+
+Tu peux les aider avec :
+- Les démarches administratives (visa, titre de séjour, inscription universitaire)
+- La vie pratique (logement, transport, banque, santé)
+- Les ressources universitaires (bibliothèques, associations, bourses)
+- L'intégration sociale (rencontrer des gens, activités culturelles)
+- Les questions de langue et de culture
+
+Réponds de manière claire, chaleureuse et pratique. Si tu ne connais pas une information spécifique à une ville ou institution, indique-le honnêtement et oriente l'étudiant vers les bons interlocuteurs.`;
+
+/**
+ * POST /api/ai/chat
+ * Envoie un message à l'assistant IA et retourne sa réponse.
+ * Body : { message: string, history: [{role, content}] }
+ *
+ * Le frontend envoie l'historique de la conversation pour maintenir le contexte.
+ */
+exports.chat = async (req, res) => {
+  try {
+    const { message, history = [] } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ message: "Message is required" });
+    }
+
+    // Construire les messages avec l'historique
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...history.slice(-10), // garder les 10 derniers échanges max
+      { role: "user", content: message.trim() },
+    ];
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      max_tokens: 800,
+      temperature: 0.7,
+    });
+
+    const reply = completion.choices[0].message.content;
+
+    res.json({
+      reply,
+      usage: completion.usage,
+    });
+  } catch (error) {
+    console.error("OpenAI error:", error);
+    res.status(500).json({ message: "AI service unavailable", error: error.message });
+  }
+};
+
+/**
+ * POST /api/ai/translate
+ * Traduit un texte vers une langue cible.
+ * Body : { text: string, targetLanguage: string, sourceLanguage?: string }
+ * targetLanguage : code ISO 639-1 (ex: "fr", "en", "es", "ar")
+ */
+exports.translateText = async (req, res) => {
+  try {
+    const { text, targetLanguage, sourceLanguage } = req.body;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Text is required" });
+    }
+
+    if (!targetLanguage) {
+      return res.status(400).json({ message: "targetLanguage is required" });
+    }
+
+    const options = { to: targetLanguage };
+    if (sourceLanguage) {
+      options.from = sourceLanguage;
+    }
+
+    const [translation, metadata] = await translate.translate(text.trim(), options);
+
+    res.json({
+      original: text.trim(),
+      translated: translation,
+      sourceLanguage: metadata.data?.translations?.[0]?.detectedSourceLanguage || sourceLanguage || "auto",
+      targetLanguage,
+    });
+  } catch (error) {
+    console.error("Translate error:", error);
+    res.status(500).json({ message: "Translation service unavailable", error: error.message });
+  }
+};
+
+/**
+ * POST /api/ai/detect-language
+ * Détecte automatiquement la langue d'un texte.
+ * Body : { text: string }
+ */
+exports.detectLanguage = async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Text is required" });
+    }
+
+    const [detections] = await translate.detect(text.trim());
+    const detection = Array.isArray(detections) ? detections[0] : detections;
+
+    res.json({
+      language: detection.language,
+      confidence: detection.confidence,
+    });
+  } catch (error) {
+    console.error("Detect language error:", error);
+    res.status(500).json({ message: "Detection service unavailable", error: error.message });
+  }
+};
+</file>
+
+<file path="controllers/authController.js">
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const db = require("../firebase");
+
+/**
+ * POST /api/auth/register
+ */
+exports.register = async (req, res) => {
+  try {
+    const { name, email, password, country, language, major } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "name, email and password are required" });
+    }
+
+    const usersRef = db.collection("users");
+    const existingUser = await usersRef.where("email", "==", email).get();
+
+    if (!existingUser.empty) {
+      return res.status(400).json({ message: "User already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = {
+      name,
+      email,
+      password: hashedPassword,
+      country: country || "",
+      language: language || "",
+      major: major || "",
+      interests: [],
+      bio: "",
+      avatar: "",
+      role: "student",
+      createdAt: new Date(),
+    };
+
+    const docRef = await usersRef.add(newUser);
+
+    const token = jwt.sign(
+      { id: docRef.id, email },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    // Retourner le profil sans le mot de passe
+    const { password: _, ...userWithoutPassword } = newUser;
+
+    res.status(201).json({ token, user: { id: docRef.id, ...userWithoutPassword } });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /api/auth/login
+ */
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: "email and password are required" });
+    }
+
+    const usersRef = db.collection("users");
+    const userSnapshot = await usersRef.where("email", "==", email).get();
+
+    if (userSnapshot.empty) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    const user = userSnapshot.docs[0].data();
+    const userId = userSnapshot.docs[0].id;
+
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    const token = jwt.sign(
+      { id: userId, email },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    const { password: _, ...userWithoutPassword } = user;
+
+    res.json({ token, user: { id: userId, ...userWithoutPassword } });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="controllers/matchController.js">
+const db = require("../firebase");
+
+/**
+ * Calcule un score de compatibilité entre l'utilisateur courant et un candidat.
+ * Score max : 100
+ *
+ * Critères :
+ * - Centres d'intérêt en commun  → 40 pts (proportionnel)
+ * - Même langue                  → 20 pts
+ * - Même pays d'origine          → 20 pts
+ * - Même filière d'étude         → 20 pts
+ */
+function computeScore(currentUser, candidate) {
+  let score = 0;
+
+  // Intérêts communs
+  const myInterests = new Set(currentUser.interests || []);
+  const theirInterests = candidate.interests || [];
+  if (myInterests.size > 0 && theirInterests.length > 0) {
+    const common = theirInterests.filter((i) => myInterests.has(i)).length;
+    const maxPossible = Math.max(myInterests.size, theirInterests.length);
+    score += Math.round((common / maxPossible) * 40);
+  }
+
+  // Langue
+  if (
+    currentUser.language &&
+    candidate.language &&
+    currentUser.language.toLowerCase() === candidate.language.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  // Pays
+  if (
+    currentUser.country &&
+    candidate.country &&
+    currentUser.country.toLowerCase() === candidate.country.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  // Filière
+  if (
+    currentUser.major &&
+    candidate.major &&
+    currentUser.major.toLowerCase() === candidate.major.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  return score;
+}
+
+/**
+ * GET /api/match/suggestions
+ * Retourne les 10 meilleurs profils compatibles pour l'utilisateur connecté,
+ * triés par score décroissant.
+ */
+exports.getSuggestions = async (req, res) => {
+  try {
+    const currentDoc = await db.collection("users").doc(req.user.id).get();
+
+    if (!currentDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const currentUser = currentDoc.data();
+
+    // Récupérer tous les autres utilisateurs
+    const snapshot = await db.collection("users").get();
+
+    const suggestions = [];
+
+    snapshot.forEach((doc) => {
+      if (doc.id === req.user.id) return; // exclure soi-même
+
+      const candidate = doc.data();
+      const score = computeScore(currentUser, candidate);
+
+      suggestions.push({
+        id: doc.id,
+        name: candidate.name,
+        country: candidate.country,
+        language: candidate.language,
+        major: candidate.major,
+        interests: candidate.interests,
+        bio: candidate.bio,
+        avatar: candidate.avatar,
+        role: candidate.role,
+        compatibilityScore: score,
+      });
+    });
+
+    // Trier par score décroissant, garder le top 10
+    suggestions.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+    const top10 = suggestions.slice(0, 10);
+
+    res.json({ suggestions: top10 });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/match/mentors
+ * Retourne uniquement les mentors compatibles (role === "mentor")
+ */
+exports.getMentors = async (req, res) => {
+  try {
+    const currentDoc = await db.collection("users").doc(req.user.id).get();
+
+    if (!currentDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const currentUser = currentDoc.data();
+
+    const snapshot = await db
+      .collection("users")
+      .where("role", "==", "mentor")
+      .get();
+
+    const mentors = [];
+
+    snapshot.forEach((doc) => {
+      if (doc.id === req.user.id) return;
+
+      const candidate = doc.data();
+      const score = computeScore(currentUser, candidate);
+
+      mentors.push({
+        id: doc.id,
+        name: candidate.name,
+        country: candidate.country,
+        language: candidate.language,
+        major: candidate.major,
+        interests: candidate.interests,
+        bio: candidate.bio,
+        avatar: candidate.avatar,
+        compatibilityScore: score,
+      });
+    });
+
+    mentors.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+
+    res.json({ mentors });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="controllers/messageController.js">
+const db = require("../firebase");
+
+/**
+ * POST /api/messages/conversations
+ * Crée ou récupère une conversation existante entre deux utilisateurs.
+ * Idempotent : si la conversation existe déjà, on la retourne.
+ */
+exports.getOrCreateConversation = async (req, res) => {
+  try {
+    const { otherUserId } = req.body;
+    const myId = req.user.id;
+
+    if (!otherUserId) {
+      return res.status(400).json({ message: "otherUserId is required" });
+    }
+
+    if (otherUserId === myId) {
+      return res.status(400).json({ message: "Cannot create conversation with yourself" });
+    }
+
+    // Vérifier que l'autre utilisateur existe
+    const otherDoc = await db.collection("users").doc(otherUserId).get();
+    if (!otherDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Chercher une conversation existante entre les deux
+    // On stocke les participants triés pour garantir l'unicité
+    const participants = [myId, otherUserId].sort();
+
+    const existing = await db
+      .collection("conversations")
+      .where("participants", "==", participants)
+      .limit(1)
+      .get();
+
+    if (!existing.empty) {
+      const conv = existing.docs[0];
+      return res.json({ id: conv.id, ...conv.data() });
+    }
+
+    // Créer la nouvelle conversation
+    const otherUser = otherDoc.data();
+    const myDoc = await db.collection("users").doc(myId).get();
+    const myData = myDoc.data();
+
+    const newConv = {
+      participants,
+      participantsInfo: {
+        [myId]: { name: myData.name, avatar: myData.avatar || "" },
+        [otherUserId]: { name: otherUser.name, avatar: otherUser.avatar || "" },
+      },
+      lastMessage: "",
+      lastMessageAt: new Date(),
+      lastSenderId: "",
+      createdAt: new Date(),
+    };
+
+    const docRef = await db.collection("conversations").add(newConv);
+
+    res.status(201).json({ id: docRef.id, ...newConv });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/messages/conversations
+ * Liste toutes les conversations de l'utilisateur connecté.
+ */
+exports.getMyConversations = async (req, res) => {
+  try {
+    const myId = req.user.id;
+
+    const snapshot = await db
+      .collection("conversations")
+      .where("participants", "array-contains", myId)
+      .orderBy("lastMessageAt", "desc")
+      .get();
+
+    const conversations = [];
+    snapshot.forEach((doc) => {
+      conversations.push({ id: doc.id, ...doc.data() });
+    });
+
+    res.json({ conversations });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/messages/conversations/:conversationId
+ * Retourne les messages d'une conversation (paginated, 50 par défaut).
+ * Query params : limit, before (timestamp ISO pour la pagination)
+ */
+exports.getMessages = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const myId = req.user.id;
+    const limit = parseInt(req.query.limit) || 50;
+
+    // Vérifier que l'utilisateur est bien membre de la conversation
+    const convDoc = await db.collection("conversations").doc(conversationId).get();
+    if (!convDoc.exists) {
+      return res.status(404).json({ message: "Conversation not found" });
+    }
+
+    const conv = convDoc.data();
+    if (!conv.participants.includes(myId)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    let query = db
+      .collection("conversations")
+      .doc(conversationId)
+      .collection("messages")
+      .orderBy("createdAt", "desc")
+      .limit(limit);
+
+    // Pagination : charger les messages avant un certain timestamp
+    if (req.query.before) {
+      const beforeDate = new Date(req.query.before);
+      query = query.startAfter(beforeDate);
+    }
+
+    const snapshot = await query.get();
+    const messages = [];
+    snapshot.forEach((doc) => {
+      messages.push({ id: doc.id, ...doc.data() });
+    });
+
+    // Retourner dans l'ordre chronologique
+    messages.reverse();
+
+    res.json({ messages });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /api/messages/conversations/:conversationId
+ * Envoie un message via HTTP (alternative à Socket.io).
+ */
+exports.sendMessage = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { text } = req.body;
+    const myId = req.user.id;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Message text is required" });
+    }
+
+    // Vérifier l'accès
+    const convDoc = await db.collection("conversations").doc(conversationId).get();
+    if (!convDoc.exists) {
+      return res.status(404).json({ message: "Conversation not found" });
+    }
+
+    const conv = convDoc.data();
+    if (!conv.participants.includes(myId)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const message = {
+      senderId: myId,
+      text: text.trim(),
+      createdAt: new Date(),
+    };
+
+    const docRef = await db
+      .collection("conversations")
+      .doc(conversationId)
+      .collection("messages")
+      .add(message);
+
+    // Mettre à jour le lastMessage
+    await db.collection("conversations").doc(conversationId).update({
+      lastMessage: message.text,
+      lastMessageAt: message.createdAt,
+      lastSenderId: myId,
+    });
+
+    res.status(201).json({ id: docRef.id, ...message });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="controllers/userController.js">
+const db = require("../firebase");
+
+/**
+ * GET /api/users/me
+ * Retourne le profil de l'utilisateur connecté
+ */
+exports.getMe = async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.user.id).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = doc.data();
+    delete user.password;
+
+    res.json({ id: doc.id, ...user });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/users/:id
+ * Retourne le profil public d'un autre utilisateur
+ */
+exports.getUserById = async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.params.id).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = doc.data();
+    // On expose uniquement les champs publics
+    const publicProfile = {
+      id: doc.id,
+      name: user.name,
+      country: user.country,
+      language: user.language,
+      major: user.major,
+      interests: user.interests,
+      bio: user.bio,
+      avatar: user.avatar,
+      role: user.role,
+    };
+
+    res.json(publicProfile);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * PUT /api/users/me
+ * Met à jour le profil de l'utilisateur connecté
+ * Champs autorisés : name, country, language, major, interests, bio, avatar
+ */
+exports.updateMe = async (req, res) => {
+  try {
+    const allowedFields = ["name", "country", "language", "major", "interests", "bio", "avatar"];
+    const updates = {};
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updates[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: "No valid fields to update" });
+    }
+
+    updates.updatedAt = new Date();
+
+    await db.collection("users").doc(req.user.id).update(updates);
+
+    res.json({ message: "Profile updated", updates });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="firebase/index.js">
+const admin = require("firebase-admin");
+const serviceAccount = require("./firebaseConfig.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
+
+module.exports = db;
+</file>
+
+<file path="middleware/authMiddleware.js">
+const jwt = require("jsonwebtoken");
+
+const authMiddleware = (req, res, next) => {
+  const header = req.headers.authorization;
+
+  if (!header) {
+    return res.status(401).json({ message: "No token provided" });
+  }
+
+  const token = header.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({ message: "Invalid token" });
+  }
+};
+
+module.exports = authMiddleware;
+</file>
+
+<file path="package.json">
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "Backend - Plateforme intégration étudiants internationaux",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google-cloud/translate": "^8.3.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "firebase-admin": "^13.9.0",
+    "jsonwebtoken": "^9.0.3",
+    "openai": "^4.98.0",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
+</file>
+
+<file path="routes/aiRoutes.js">
+const express = require("express");
+const router = express.Router();
+const aiController = require("../controllers/aiController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+router.use(authMiddleware);
+
+router.post("/chat", aiController.chat);
+router.post("/translate", aiController.translateText);
+router.post("/detect-language", aiController.detectLanguage);
+
+module.exports = router;
+</file>
+
+<file path="routes/authRoutes.js">
+const express = require("express");
+const router = express.Router();
+const authController = require("../controllers/authController");
+
+router.post("/register", authController.register);
+router.post("/login", authController.login);
+
+module.exports = router;
+</file>
+
+<file path="routes/matchRoutes.js">
+const express = require("express");
+const router = express.Router();
+const matchController = require("../controllers/matchController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+router.use(authMiddleware);
+
+router.get("/suggestions", matchController.getSuggestions);
+router.get("/mentors", matchController.getMentors);
+
+module.exports = router;
+</file>
+
+<file path="routes/messageRoutes.js">
+const express = require("express");
+const router = express.Router();
+const messageController = require("../controllers/messageController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+router.use(authMiddleware);
+
+// Conversations
+router.get("/conversations", messageController.getMyConversations);
+router.post("/conversations", messageController.getOrCreateConversation);
+
+// Messages dans une conversation
+router.get("/conversations/:conversationId", messageController.getMessages);
+router.post("/conversations/:conversationId", messageController.sendMessage);
+
+module.exports = router;
+</file>
+
+<file path="routes/userRoutes.js">
+const express = require("express");
+const router = express.Router();
+const userController = require("../controllers/userController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+// Toutes les routes nécessitent une authentification
+router.use(authMiddleware);
+
+router.get("/me", userController.getMe);
+router.put("/me", userController.updateMe);
+router.get("/:id", userController.getUserById);
+
+module.exports = router;
+</file>
+
+<file path="server.js">
+require("dotenv").config();
+
+const http = require("http");
+const { Server } = require("socket.io");
+
+const app = require("./app");
+const db = require("./firebase");
+
+const server = http.createServer(app);
+
+/* =======================
+   SOCKET.IO
+======================= */
+
+const io = new Server(server, {
+  cors: { origin: "*" },
+});
+
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+
+  // Rejoindre une conversation
+  socket.on("joinRoom", (conversationId) => {
+    socket.join(conversationId);
+    console.log(`Socket ${socket.id} joined room ${conversationId}`);
+  });
+
+  // Quitter une conversation
+  socket.on("leaveRoom", (conversationId) => {
+    socket.leave(conversationId);
+  });
+
+  // Envoyer un message — on persiste en Firestore puis on broadcast
+  socket.on("sendMessage", async (data) => {
+    const { conversationId, message } = data;
+
+    try {
+      // Persister le message
+      const msgRef = db
+        .collection("conversations")
+        .doc(conversationId)
+        .collection("messages");
+
+      const docRef = await msgRef.add({
+        ...message,
+        createdAt: new Date(),
+      });
+
+      // Mettre à jour le lastMessage de la conversation
+      await db.collection("conversations").doc(conversationId).update({
+        lastMessage: message.text,
+        lastMessageAt: new Date(),
+        lastSenderId: message.senderId,
+      });
+
+      const savedMessage = { id: docRef.id, ...message, createdAt: new Date() };
+
+      // Broadcast à tous les membres du room
+      io.to(conversationId).emit("receiveMessage", savedMessage);
+    } catch (error) {
+      console.error("Error saving message:", error);
+      socket.emit("messageError", { error: "Failed to send message" });
+    }
+  });
+
+  // Indicateur de frappe
+  socket.on("typing", ({ conversationId, userId }) => {
+    socket.to(conversationId).emit("typing", { userId });
+  });
+
+  socket.on("stopTyping", ({ conversationId, userId }) => {
+    socket.to(conversationId).emit("stopTyping", { userId });
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+  });
+});
+
+/* =======================
+   START SERVER
+======================= */
+
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+</file>
+
+</files>
+</file>
+
+<file path="server/routes/activityRoutes.js">
+const express = require("express");
+const router = express.Router();
+const activityController = require("../controllers/activityController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+router.use(authMiddleware);
+
+router.get("/recommendations", activityController.getRecommendations);
+router.get("/", activityController.getAllActivities);
+router.get("/:id", activityController.getActivityById);
+router.post("/:id/join", activityController.joinActivity);
+router.post("/:id/leave", activityController.leaveActivity);
+
+module.exports = router;
+</file>
+
+<file path="server/routes/aiRoutes.js">
+const express = require("express");
+const router = express.Router();
+const aiController = require("../controllers/aiController");
+const authMiddleware = require("../middleware/authMiddleware");
+const { validateAIChat } = require("../middleware/validation");
+
+router.use(authMiddleware);
+
+router.post("/chat", validateAIChat, aiController.chat);
+router.post("/translate", aiController.translateText);
+router.post("/detect-language", aiController.detectLanguage);
+
+module.exports = router;
+</file>
+
+<file path="server/routes/authRoutes.js">
+const express = require("express");
+const router = express.Router();
+const authController = require("../controllers/authController");
+const { validateRegister, validateLogin } = require("../middleware/validation");
+
+router.post("/register", validateRegister, authController.register);
+router.post("/login", validateLogin, authController.login);
+
+module.exports = router;
+</file>
+
+<file path="server/routes/matchRoutes.js">
+const express = require("express");
+const router = express.Router();
+const matchController = require("../controllers/matchController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+router.use(authMiddleware);
+
+router.get("/suggestions", matchController.getSuggestions);
+router.get("/mentors", matchController.getMentors);
+
+module.exports = router;
+</file>
+
+<file path="server/routes/messageRoutes.js">
+const express = require("express");
+const router = express.Router();
+const messageController = require("../controllers/messageController");
+const authMiddleware = require("../middleware/authMiddleware");
+const { validateMessage } = require("../middleware/validation");
+
+router.use(authMiddleware);
+
+// Conversations
+router.get("/conversations", messageController.getMyConversations);
+router.post("/conversations", messageController.getOrCreateConversation);
+
+// Messages dans une conversation
+router.get("/conversations/:conversationId", messageController.getMessages);
+router.post("/conversations/:conversationId", validateMessage, messageController.sendMessage);
+
+module.exports = router;
+</file>
+
+<file path="server/routes/userRoutes.js">
+const express = require("express");
+const router = express.Router();
+const userController = require("../controllers/userController");
+const authMiddleware = require("../middleware/authMiddleware");
+const { validateProfileUpdate } = require("../middleware/validation");
+
+// Toutes les routes nécessitent une authentification
+router.use(authMiddleware);
+
+router.get("/me", userController.getMe);
+router.put("/me", validateProfileUpdate, userController.updateMe);
+router.get("/:id", userController.getUserById);
+
+module.exports = router;
+</file>
+
+<file path="server/server.js">
+require("dotenv").config();
+
+const http = require("http");
+const { Server } = require("socket.io");
+
+const app = require("./app");
+const db = require("./firebase");
+
+const server = http.createServer(app);
+
+/* =======================
+   SOCKET.IO
+======================= */
+
+const io = new Server(server, {
+  cors: { origin: "*" },
+});
+
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+
+  // Rejoindre une conversation
+  socket.on("joinRoom", (conversationId) => {
+    socket.join(conversationId);
+    console.log(`Socket ${socket.id} joined room ${conversationId}`);
+  });
+
+  // Quitter une conversation
+  socket.on("leaveRoom", (conversationId) => {
+    socket.leave(conversationId);
+  });
+
+  // Envoyer un message — on persiste en Firestore puis on broadcast
+  socket.on("sendMessage", async (data) => {
+    const { conversationId, message } = data;
+
+    try {
+      // Persister le message
+      const msgRef = db
+        .collection("conversations")
+        .doc(conversationId)
+        .collection("messages");
+
+      const docRef = await msgRef.add({
+        ...message,
+        createdAt: new Date(),
+      });
+
+      // Mettre à jour le lastMessage de la conversation
+      await db.collection("conversations").doc(conversationId).update({
+        lastMessage: message.text,
+        lastMessageAt: new Date(),
+        lastSenderId: message.senderId,
+      });
+
+      const savedMessage = { id: docRef.id, ...message, createdAt: new Date() };
+
+      // Broadcast à tous les membres du room
+      io.to(conversationId).emit("receiveMessage", savedMessage);
+    } catch (error) {
+      console.error("Error saving message:", error);
+      socket.emit("messageError", { error: "Failed to send message" });
+    }
+  });
+
+  // Indicateur de frappe
+  socket.on("typing", ({ conversationId, userId }) => {
+    socket.to(conversationId).emit("typing", { userId });
+  });
+
+  socket.on("stopTyping", ({ conversationId, userId }) => {
+    socket.to(conversationId).emit("stopTyping", { userId });
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+  });
+});
+
+/* =======================
+   START SERVER
+======================= */
+
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+</file>
+
+</files>

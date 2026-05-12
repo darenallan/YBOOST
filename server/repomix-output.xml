@@ -1,0 +1,1013 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.env.example
+app.js
+controllers/aiController.js
+controllers/authController.js
+controllers/matchController.js
+controllers/messageController.js
+controllers/userController.js
+firebase/firebaseConfig.json
+firebase/index.js
+middleware/authMiddleware.js
+package.json
+routes/aiRoutes.js
+routes/authRoutes.js
+routes/matchRoutes.js
+routes/messageRoutes.js
+routes/userRoutes.js
+server.js
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".env.example">
+PORT=5000
+
+# JWT
+JWT_SECRET=your_very_secret_key_here
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# Google Cloud Translate
+GOOGLE_TRANSLATE_API_KEY=AIza...
+</file>
+
+<file path="app.js">
+const express = require("express");
+const cors = require("cors");
+
+const authRoutes = require("./routes/authRoutes");
+const userRoutes = require("./routes/userRoutes");
+const matchRoutes = require("./routes/matchRoutes");
+const messageRoutes = require("./routes/messageRoutes");
+const aiRoutes = require("./routes/aiRoutes");
+
+const app = express();
+
+/* =======================
+   MIDDLEWARE
+======================= */
+
+app.use(cors({ origin: "*" }));
+app.use(express.json());
+
+/* =======================
+   ROUTES
+======================= */
+
+app.get("/", (req, res) => {
+  res.json({ message: "API is running 🚀" });
+});
+
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/match", matchRoutes);
+app.use("/api/messages", messageRoutes);
+app.use("/api/ai", aiRoutes);
+
+/* =======================
+   ERROR HANDLER GLOBAL
+======================= */
+
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ message: "Internal server error" });
+});
+
+module.exports = app;
+</file>
+
+<file path="controllers/aiController.js">
+const OpenAI = require("openai");
+const { Translate } = require("@google-cloud/translate").v2;
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const translate = new Translate({ key: process.env.GOOGLE_TRANSLATE_API_KEY });
+
+// Système prompt de l'assistant étudiant
+const SYSTEM_PROMPT = `Tu es un assistant bienveillant et expert dédié à aider les étudiants internationaux à s'intégrer dans leur nouveau pays.
+
+Tu peux les aider avec :
+- Les démarches administratives (visa, titre de séjour, inscription universitaire)
+- La vie pratique (logement, transport, banque, santé)
+- Les ressources universitaires (bibliothèques, associations, bourses)
+- L'intégration sociale (rencontrer des gens, activités culturelles)
+- Les questions de langue et de culture
+
+Réponds de manière claire, chaleureuse et pratique. Si tu ne connais pas une information spécifique à une ville ou institution, indique-le honnêtement et oriente l'étudiant vers les bons interlocuteurs.`;
+
+/**
+ * POST /api/ai/chat
+ * Envoie un message à l'assistant IA et retourne sa réponse.
+ * Body : { message: string, history: [{role, content}] }
+ *
+ * Le frontend envoie l'historique de la conversation pour maintenir le contexte.
+ */
+exports.chat = async (req, res) => {
+  try {
+    const { message, history = [] } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ message: "Message is required" });
+    }
+
+    // Construire les messages avec l'historique
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...history.slice(-10), // garder les 10 derniers échanges max
+      { role: "user", content: message.trim() },
+    ];
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      max_tokens: 800,
+      temperature: 0.7,
+    });
+
+    const reply = completion.choices[0].message.content;
+
+    res.json({
+      reply,
+      usage: completion.usage,
+    });
+  } catch (error) {
+    console.error("OpenAI error:", error);
+    res.status(500).json({ message: "AI service unavailable", error: error.message });
+  }
+};
+
+/**
+ * POST /api/ai/translate
+ * Traduit un texte vers une langue cible.
+ * Body : { text: string, targetLanguage: string, sourceLanguage?: string }
+ * targetLanguage : code ISO 639-1 (ex: "fr", "en", "es", "ar")
+ */
+exports.translateText = async (req, res) => {
+  try {
+    const { text, targetLanguage, sourceLanguage } = req.body;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Text is required" });
+    }
+
+    if (!targetLanguage) {
+      return res.status(400).json({ message: "targetLanguage is required" });
+    }
+
+    const options = { to: targetLanguage };
+    if (sourceLanguage) {
+      options.from = sourceLanguage;
+    }
+
+    const [translation, metadata] = await translate.translate(text.trim(), options);
+
+    res.json({
+      original: text.trim(),
+      translated: translation,
+      sourceLanguage: metadata.data?.translations?.[0]?.detectedSourceLanguage || sourceLanguage || "auto",
+      targetLanguage,
+    });
+  } catch (error) {
+    console.error("Translate error:", error);
+    res.status(500).json({ message: "Translation service unavailable", error: error.message });
+  }
+};
+
+/**
+ * POST /api/ai/detect-language
+ * Détecte automatiquement la langue d'un texte.
+ * Body : { text: string }
+ */
+exports.detectLanguage = async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Text is required" });
+    }
+
+    const [detections] = await translate.detect(text.trim());
+    const detection = Array.isArray(detections) ? detections[0] : detections;
+
+    res.json({
+      language: detection.language,
+      confidence: detection.confidence,
+    });
+  } catch (error) {
+    console.error("Detect language error:", error);
+    res.status(500).json({ message: "Detection service unavailable", error: error.message });
+  }
+};
+</file>
+
+<file path="controllers/authController.js">
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const db = require("../firebase");
+
+/**
+ * POST /api/auth/register
+ */
+exports.register = async (req, res) => {
+  try {
+    const { name, email, password, country, language, major } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "name, email and password are required" });
+    }
+
+    const usersRef = db.collection("users");
+    const existingUser = await usersRef.where("email", "==", email).get();
+
+    if (!existingUser.empty) {
+      return res.status(400).json({ message: "User already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = {
+      name,
+      email,
+      password: hashedPassword,
+      country: country || "",
+      language: language || "",
+      major: major || "",
+      interests: [],
+      bio: "",
+      avatar: "",
+      role: "student",
+      createdAt: new Date(),
+    };
+
+    const docRef = await usersRef.add(newUser);
+
+    const token = jwt.sign(
+      { id: docRef.id, email },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    // Retourner le profil sans le mot de passe
+    const { password: _, ...userWithoutPassword } = newUser;
+
+    res.status(201).json({ token, user: { id: docRef.id, ...userWithoutPassword } });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /api/auth/login
+ */
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: "email and password are required" });
+    }
+
+    const usersRef = db.collection("users");
+    const userSnapshot = await usersRef.where("email", "==", email).get();
+
+    if (userSnapshot.empty) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    const user = userSnapshot.docs[0].data();
+    const userId = userSnapshot.docs[0].id;
+
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    const token = jwt.sign(
+      { id: userId, email },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    const { password: _, ...userWithoutPassword } = user;
+
+    res.json({ token, user: { id: userId, ...userWithoutPassword } });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="controllers/matchController.js">
+const db = require("../firebase");
+
+/**
+ * Calcule un score de compatibilité entre l'utilisateur courant et un candidat.
+ * Score max : 100
+ *
+ * Critères :
+ * - Centres d'intérêt en commun  → 40 pts (proportionnel)
+ * - Même langue                  → 20 pts
+ * - Même pays d'origine          → 20 pts
+ * - Même filière d'étude         → 20 pts
+ */
+function computeScore(currentUser, candidate) {
+  let score = 0;
+
+  // Intérêts communs
+  const myInterests = new Set(currentUser.interests || []);
+  const theirInterests = candidate.interests || [];
+  if (myInterests.size > 0 && theirInterests.length > 0) {
+    const common = theirInterests.filter((i) => myInterests.has(i)).length;
+    const maxPossible = Math.max(myInterests.size, theirInterests.length);
+    score += Math.round((common / maxPossible) * 40);
+  }
+
+  // Langue
+  if (
+    currentUser.language &&
+    candidate.language &&
+    currentUser.language.toLowerCase() === candidate.language.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  // Pays
+  if (
+    currentUser.country &&
+    candidate.country &&
+    currentUser.country.toLowerCase() === candidate.country.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  // Filière
+  if (
+    currentUser.major &&
+    candidate.major &&
+    currentUser.major.toLowerCase() === candidate.major.toLowerCase()
+  ) {
+    score += 20;
+  }
+
+  return score;
+}
+
+/**
+ * GET /api/match/suggestions
+ * Retourne les 10 meilleurs profils compatibles pour l'utilisateur connecté,
+ * triés par score décroissant.
+ */
+exports.getSuggestions = async (req, res) => {
+  try {
+    const currentDoc = await db.collection("users").doc(req.user.id).get();
+
+    if (!currentDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const currentUser = currentDoc.data();
+
+    // Récupérer tous les autres utilisateurs
+    const snapshot = await db.collection("users").get();
+
+    const suggestions = [];
+
+    snapshot.forEach((doc) => {
+      if (doc.id === req.user.id) return; // exclure soi-même
+
+      const candidate = doc.data();
+      const score = computeScore(currentUser, candidate);
+
+      suggestions.push({
+        id: doc.id,
+        name: candidate.name,
+        country: candidate.country,
+        language: candidate.language,
+        major: candidate.major,
+        interests: candidate.interests,
+        bio: candidate.bio,
+        avatar: candidate.avatar,
+        role: candidate.role,
+        compatibilityScore: score,
+      });
+    });
+
+    // Trier par score décroissant, garder le top 10
+    suggestions.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+    const top10 = suggestions.slice(0, 10);
+
+    res.json({ suggestions: top10 });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/match/mentors
+ * Retourne uniquement les mentors compatibles (role === "mentor")
+ */
+exports.getMentors = async (req, res) => {
+  try {
+    const currentDoc = await db.collection("users").doc(req.user.id).get();
+
+    if (!currentDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const currentUser = currentDoc.data();
+
+    const snapshot = await db
+      .collection("users")
+      .where("role", "==", "mentor")
+      .get();
+
+    const mentors = [];
+
+    snapshot.forEach((doc) => {
+      if (doc.id === req.user.id) return;
+
+      const candidate = doc.data();
+      const score = computeScore(currentUser, candidate);
+
+      mentors.push({
+        id: doc.id,
+        name: candidate.name,
+        country: candidate.country,
+        language: candidate.language,
+        major: candidate.major,
+        interests: candidate.interests,
+        bio: candidate.bio,
+        avatar: candidate.avatar,
+        compatibilityScore: score,
+      });
+    });
+
+    mentors.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+
+    res.json({ mentors });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="controllers/messageController.js">
+const db = require("../firebase");
+
+/**
+ * POST /api/messages/conversations
+ * Crée ou récupère une conversation existante entre deux utilisateurs.
+ * Idempotent : si la conversation existe déjà, on la retourne.
+ */
+exports.getOrCreateConversation = async (req, res) => {
+  try {
+    const { otherUserId } = req.body;
+    const myId = req.user.id;
+
+    if (!otherUserId) {
+      return res.status(400).json({ message: "otherUserId is required" });
+    }
+
+    if (otherUserId === myId) {
+      return res.status(400).json({ message: "Cannot create conversation with yourself" });
+    }
+
+    // Vérifier que l'autre utilisateur existe
+    const otherDoc = await db.collection("users").doc(otherUserId).get();
+    if (!otherDoc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Chercher une conversation existante entre les deux
+    // On stocke les participants triés pour garantir l'unicité
+    const participants = [myId, otherUserId].sort();
+
+    const existing = await db
+      .collection("conversations")
+      .where("participants", "==", participants)
+      .limit(1)
+      .get();
+
+    if (!existing.empty) {
+      const conv = existing.docs[0];
+      return res.json({ id: conv.id, ...conv.data() });
+    }
+
+    // Créer la nouvelle conversation
+    const otherUser = otherDoc.data();
+    const myDoc = await db.collection("users").doc(myId).get();
+    const myData = myDoc.data();
+
+    const newConv = {
+      participants,
+      participantsInfo: {
+        [myId]: { name: myData.name, avatar: myData.avatar || "" },
+        [otherUserId]: { name: otherUser.name, avatar: otherUser.avatar || "" },
+      },
+      lastMessage: "",
+      lastMessageAt: new Date(),
+      lastSenderId: "",
+      createdAt: new Date(),
+    };
+
+    const docRef = await db.collection("conversations").add(newConv);
+
+    res.status(201).json({ id: docRef.id, ...newConv });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/messages/conversations
+ * Liste toutes les conversations de l'utilisateur connecté.
+ */
+exports.getMyConversations = async (req, res) => {
+  try {
+    const myId = req.user.id;
+
+    const snapshot = await db
+      .collection("conversations")
+      .where("participants", "array-contains", myId)
+      .orderBy("lastMessageAt", "desc")
+      .get();
+
+    const conversations = [];
+    snapshot.forEach((doc) => {
+      conversations.push({ id: doc.id, ...doc.data() });
+    });
+
+    res.json({ conversations });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/messages/conversations/:conversationId
+ * Retourne les messages d'une conversation (paginated, 50 par défaut).
+ * Query params : limit, before (timestamp ISO pour la pagination)
+ */
+exports.getMessages = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const myId = req.user.id;
+    const limit = parseInt(req.query.limit) || 50;
+
+    // Vérifier que l'utilisateur est bien membre de la conversation
+    const convDoc = await db.collection("conversations").doc(conversationId).get();
+    if (!convDoc.exists) {
+      return res.status(404).json({ message: "Conversation not found" });
+    }
+
+    const conv = convDoc.data();
+    if (!conv.participants.includes(myId)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    let query = db
+      .collection("conversations")
+      .doc(conversationId)
+      .collection("messages")
+      .orderBy("createdAt", "desc")
+      .limit(limit);
+
+    // Pagination : charger les messages avant un certain timestamp
+    if (req.query.before) {
+      const beforeDate = new Date(req.query.before);
+      query = query.startAfter(beforeDate);
+    }
+
+    const snapshot = await query.get();
+    const messages = [];
+    snapshot.forEach((doc) => {
+      messages.push({ id: doc.id, ...doc.data() });
+    });
+
+    // Retourner dans l'ordre chronologique
+    messages.reverse();
+
+    res.json({ messages });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /api/messages/conversations/:conversationId
+ * Envoie un message via HTTP (alternative à Socket.io).
+ */
+exports.sendMessage = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { text } = req.body;
+    const myId = req.user.id;
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: "Message text is required" });
+    }
+
+    // Vérifier l'accès
+    const convDoc = await db.collection("conversations").doc(conversationId).get();
+    if (!convDoc.exists) {
+      return res.status(404).json({ message: "Conversation not found" });
+    }
+
+    const conv = convDoc.data();
+    if (!conv.participants.includes(myId)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const message = {
+      senderId: myId,
+      text: text.trim(),
+      createdAt: new Date(),
+    };
+
+    const docRef = await db
+      .collection("conversations")
+      .doc(conversationId)
+      .collection("messages")
+      .add(message);
+
+    // Mettre à jour le lastMessage
+    await db.collection("conversations").doc(conversationId).update({
+      lastMessage: message.text,
+      lastMessageAt: message.createdAt,
+      lastSenderId: myId,
+    });
+
+    res.status(201).json({ id: docRef.id, ...message });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="controllers/userController.js">
+const db = require("../firebase");
+
+/**
+ * GET /api/users/me
+ * Retourne le profil de l'utilisateur connecté
+ */
+exports.getMe = async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.user.id).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = doc.data();
+    delete user.password;
+
+    res.json({ id: doc.id, ...user });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/users/:id
+ * Retourne le profil public d'un autre utilisateur
+ */
+exports.getUserById = async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.params.id).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = doc.data();
+    // On expose uniquement les champs publics
+    const publicProfile = {
+      id: doc.id,
+      name: user.name,
+      country: user.country,
+      language: user.language,
+      major: user.major,
+      interests: user.interests,
+      bio: user.bio,
+      avatar: user.avatar,
+      role: user.role,
+    };
+
+    res.json(publicProfile);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * PUT /api/users/me
+ * Met à jour le profil de l'utilisateur connecté
+ * Champs autorisés : name, country, language, major, interests, bio, avatar
+ */
+exports.updateMe = async (req, res) => {
+  try {
+    const allowedFields = ["name", "country", "language", "major", "interests", "bio", "avatar"];
+    const updates = {};
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updates[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: "No valid fields to update" });
+    }
+
+    updates.updatedAt = new Date();
+
+    await db.collection("users").doc(req.user.id).update(updates);
+
+    res.json({ message: "Profile updated", updates });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+</file>
+
+<file path="firebase/index.js">
+const admin = require("firebase-admin");
+const serviceAccount = require("./firebaseConfig.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
+
+module.exports = db;
+</file>
+
+<file path="middleware/authMiddleware.js">
+const jwt = require("jsonwebtoken");
+
+const authMiddleware = (req, res, next) => {
+  const header = req.headers.authorization;
+
+  if (!header) {
+    return res.status(401).json({ message: "No token provided" });
+  }
+
+  const token = header.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({ message: "Invalid token" });
+  }
+};
+
+module.exports = authMiddleware;
+</file>
+
+<file path="package.json">
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "Backend - Plateforme intégration étudiants internationaux",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google-cloud/translate": "^8.3.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "firebase-admin": "^13.9.0",
+    "jsonwebtoken": "^9.0.3",
+    "openai": "^4.98.0",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
+</file>
+
+<file path="routes/aiRoutes.js">
+const express = require("express");
+const router = express.Router();
+const aiController = require("../controllers/aiController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+router.use(authMiddleware);
+
+router.post("/chat", aiController.chat);
+router.post("/translate", aiController.translateText);
+router.post("/detect-language", aiController.detectLanguage);
+
+module.exports = router;
+</file>
+
+<file path="routes/authRoutes.js">
+const express = require("express");
+const router = express.Router();
+const authController = require("../controllers/authController");
+
+router.post("/register", authController.register);
+router.post("/login", authController.login);
+
+module.exports = router;
+</file>
+
+<file path="routes/matchRoutes.js">
+const express = require("express");
+const router = express.Router();
+const matchController = require("../controllers/matchController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+router.use(authMiddleware);
+
+router.get("/suggestions", matchController.getSuggestions);
+router.get("/mentors", matchController.getMentors);
+
+module.exports = router;
+</file>
+
+<file path="routes/messageRoutes.js">
+const express = require("express");
+const router = express.Router();
+const messageController = require("../controllers/messageController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+router.use(authMiddleware);
+
+// Conversations
+router.get("/conversations", messageController.getMyConversations);
+router.post("/conversations", messageController.getOrCreateConversation);
+
+// Messages dans une conversation
+router.get("/conversations/:conversationId", messageController.getMessages);
+router.post("/conversations/:conversationId", messageController.sendMessage);
+
+module.exports = router;
+</file>
+
+<file path="routes/userRoutes.js">
+const express = require("express");
+const router = express.Router();
+const userController = require("../controllers/userController");
+const authMiddleware = require("../middleware/authMiddleware");
+
+// Toutes les routes nécessitent une authentification
+router.use(authMiddleware);
+
+router.get("/me", userController.getMe);
+router.put("/me", userController.updateMe);
+router.get("/:id", userController.getUserById);
+
+module.exports = router;
+</file>
+
+<file path="server.js">
+require("dotenv").config();
+
+const http = require("http");
+const { Server } = require("socket.io");
+
+const app = require("./app");
+const db = require("./firebase");
+
+const server = http.createServer(app);
+
+/* =======================
+   SOCKET.IO
+======================= */
+
+const io = new Server(server, {
+  cors: { origin: "*" },
+});
+
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+
+  // Rejoindre une conversation
+  socket.on("joinRoom", (conversationId) => {
+    socket.join(conversationId);
+    console.log(`Socket ${socket.id} joined room ${conversationId}`);
+  });
+
+  // Quitter une conversation
+  socket.on("leaveRoom", (conversationId) => {
+    socket.leave(conversationId);
+  });
+
+  // Envoyer un message — on persiste en Firestore puis on broadcast
+  socket.on("sendMessage", async (data) => {
+    const { conversationId, message } = data;
+
+    try {
+      // Persister le message
+      const msgRef = db
+        .collection("conversations")
+        .doc(conversationId)
+        .collection("messages");
+
+      const docRef = await msgRef.add({
+        ...message,
+        createdAt: new Date(),
+      });
+
+      // Mettre à jour le lastMessage de la conversation
+      await db.collection("conversations").doc(conversationId).update({
+        lastMessage: message.text,
+        lastMessageAt: new Date(),
+        lastSenderId: message.senderId,
+      });
+
+      const savedMessage = { id: docRef.id, ...message, createdAt: new Date() };
+
+      // Broadcast à tous les membres du room
+      io.to(conversationId).emit("receiveMessage", savedMessage);
+    } catch (error) {
+      console.error("Error saving message:", error);
+      socket.emit("messageError", { error: "Failed to send message" });
+    }
+  });
+
+  // Indicateur de frappe
+  socket.on("typing", ({ conversationId, userId }) => {
+    socket.to(conversationId).emit("typing", { userId });
+  });
+
+  socket.on("stopTyping", ({ conversationId, userId }) => {
+    socket.to(conversationId).emit("stopTyping", { userId });
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+  });
+});
+
+/* =======================
+   START SERVER
+======================= */
+
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+</file>
+
+</files>
